@@ -1,0 +1,176 @@
+import React, { useEffect } from 'react';
+import { connect } from 'react-redux';
+import { bindActionCreators } from 'redux';
+
+import { Link } from 'react-router-dom';
+
+import ActionDrawer from './components/ActionDrawer';
+
+import './stylesheet.css';
+
+import classNames from 'classnames';
+import { formatDistanceToNow, parseISO } from 'date-fns';
+
+import * as syncBackendActions from '../../actions/sync_backend';
+
+const FileBrowser = ({
+  path,
+  listing,
+  hasMore,
+  isLoadingMore,
+  offline,
+  isOnline,
+  syncBackendType,
+  syncBackend,
+  // INFO: This was required back when we had Google Drive support.
+  // Leaving it here in case another sync backend requires it.
+  // additionalSyncBackendState,
+}) => {
+  // Also when coming back online, to replace a saved listing.
+  useEffect(() => {
+    syncBackend.getDirectoryListing(path);
+  }, [syncBackend, path, isOnline]);
+
+  // In a saved listing, only entries with a local copy (files) or a
+  // saved listing (folders) can be opened.
+  const isAvailable = (file) => !offline || offline.get('availablePaths').has(file.get('path'));
+
+  const handleLoadMoreClick = () => syncBackend.loadMoreDirectoryListing();
+
+  const getParentDirectoryPath = () => {
+    switch (syncBackendType) {
+      case 'Dropbox':
+      case 'GitLab':
+      case 'Forgejo':
+      case 'WebDAV':
+        const pathParts = path.split('/');
+        return pathParts.slice(0, pathParts.length - 1).join('/');
+      default:
+        return null;
+    }
+  };
+
+  const isTopLevelDirectory = path === '';
+
+  return (
+    <div className="file-browser-container">
+      {syncBackendType === 'Dropbox' && (
+        <h3 className="file-browser__header">Directory: {isTopLevelDirectory ? '/' : path}</h3>
+      )}
+
+      <ActionDrawer />
+
+      {offline && (
+        <p className="file-browser__offline-notice">
+          {offline.get('savedAt')
+            ? `Can't reach the sync service. Showing this folder as of ${formatDistanceToNow(
+                parseISO(offline.get('savedAt'))
+              )} ago.`
+            : "Can't reach the sync service, and this folder hasn't been visited before."}
+        </p>
+      )}
+
+      <ul className="file-browser__file-list">
+        {!isTopLevelDirectory && (
+          <Link to={`/files${getParentDirectoryPath()}`}>
+            <li className="file-browser__file-list__element">
+              <i className="fas fa-folder file-browser__file-list__icon--directory" /> ..
+            </li>
+          </Link>
+        )}
+
+        {(listing || []).map((file) => {
+          const isDirectory = file.get('isDirectory');
+          const isBackupFile = file.get('name').endsWith('.organice-bak');
+          const isOrgFile = file.get('name').endsWith('.org');
+          const isSettingsFile = file.get('name') === '.organice-config.json';
+
+          const iconClass = classNames('file-browser__file-list__icon fas', {
+            'fa-folder': isDirectory,
+            'file-browser__file-list__icon--directory': isDirectory,
+            'fa-file': !isDirectory && !isBackupFile && !isSettingsFile,
+            'file-browser__file-list__icon--not-org': !isOrgFile,
+            'fa-copy': isBackupFile,
+            'fa-cogs': isSettingsFile,
+          });
+
+          if (!isAvailable(file)) {
+            return (
+              <li
+                className="file-browser__file-list__element file-browser__file-list__element--unavailable"
+                title="Not available offline"
+                key={file.get('id')}
+              >
+                <i className={iconClass} /> {file.get('name')}
+                {isDirectory ? '/' : ''}
+              </li>
+            );
+          }
+
+          if (file.get('isDirectory')) {
+            return (
+              <Link to={`/files${file.get('path')}`} key={file.get('id')}>
+                <li className="file-browser__file-list__element">
+                  <i className={iconClass} /> {file.get('name')}/
+                </li>
+              </Link>
+            );
+          } else {
+            return (
+              <Link to={`/file${file.get('path')}`} key={file.get('id')}>
+                <li className="file-browser__file-list__element">
+                  <i className={iconClass} /> {file.get('name')}
+                </li>
+              </Link>
+            );
+          }
+        })}
+
+        {hasMore &&
+          (isLoadingMore ? (
+            <li className="file-browser__file-list__loading-more-container">
+              <i className="fas fa-spinner fa-lg fa-spin" />
+            </li>
+          ) : (
+            <li
+              className="file-browser__file-list__element file-browser__file-list__element--load-more-row"
+              onClick={handleLoadMoreClick}
+            >
+              Load more...
+            </li>
+          ))}
+      </ul>
+    </div>
+  );
+};
+
+const mapStateToProps = (state) => {
+  const currentFileBrowserDirectoryListing = state.syncBackend.get(
+    'currentFileBrowserDirectoryListing'
+  );
+  return {
+    offline:
+      !!currentFileBrowserDirectoryListing && currentFileBrowserDirectoryListing.get('offline'),
+    isOnline: state.base.get('online'),
+    syncBackendType: state.syncBackend.get('client').type,
+    listing: !!currentFileBrowserDirectoryListing
+      ? currentFileBrowserDirectoryListing.get('listing')
+      : null,
+    hasMore:
+      !!currentFileBrowserDirectoryListing && currentFileBrowserDirectoryListing.get('hasMore'),
+    isLoadingMore:
+      !!currentFileBrowserDirectoryListing &&
+      currentFileBrowserDirectoryListing.get('isLoadingMore'),
+    additionalSyncBackendState:
+      !!currentFileBrowserDirectoryListing &&
+      currentFileBrowserDirectoryListing.get('additionalSyncBackendState'),
+  };
+};
+
+const mapDispatchToProps = (dispatch) => {
+  return {
+    syncBackend: bindActionCreators(syncBackendActions, dispatch),
+  };
+};
+
+export default connect(mapStateToProps, mapDispatchToProps)(FileBrowser);

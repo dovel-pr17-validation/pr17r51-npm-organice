@@ -1,0 +1,268 @@
+import { ActionCreators } from 'redux-undo';
+
+import { setLoadingMessage, hideLoadingMessage, clearModalStack, setIsLoading } from './base';
+import {
+  parseFile,
+  reportFileError,
+  restoreUnsyncedLocalCopy,
+  setDirty,
+  setLastSyncAt,
+  sync,
+} from './org';
+import { localStorageAvailable, persistField } from '../util/settings_persister';
+import {
+  clearFileStore,
+  getListingRecord,
+  getOfflinePaths,
+  putListingRecord,
+} from '../util/file_store';
+import { createGitlabOAuth } from '../sync_backend_clients/gitlab_sync_backend_client';
+
+import { addSeconds } from 'date-fns';
+
+import _ from 'lodash';
+
+import pathParse from 'path-parse';
+
+import { List, Map, Set } from 'immutable';
+
+export const signOut = () => (dispatch, getState) => {
+  switch (getState().syncBackend.get('client', {}).type) {
+    case 'WebDAV':
+      ['Endpoint', 'Username', 'Password'].forEach((e) => {
+        persistField('webdav' + e, null);
+      });
+      break;
+    case 'Dropbox':
+      // `dropboxAccessToken` is a legacy token that was relevant
+      // prior to switching to OAuth 2 and PKCE. Still deleting it
+      // here for a consistent state in users localStorage.
+      persistField('dropboxAccessToken', null);
+      persistField('dropboxRefreshToken', null);
+      persistField('codeVerifier', null);
+      break;
+    case 'GitLab':
+      persistField('gitLabProject', null);
+      createGitlabOAuth().reset();
+      break;
+    case 'Forgejo':
+      ['Domain', 'Owner', 'Repository', 'AccessToken'].forEach((e) => {
+        persistField('forgejo' + e, null);
+      });
+      break;
+    default:
+  }
+
+  persistField('authenticatedSyncService', null);
+
+  dispatch({ type: 'SIGN_OUT' });
+  dispatch(clearModalStack());
+  dispatch(hideLoadingMessage());
+
+  if (localStorageAvailable) {
+    localStorage.clear();
+  }
+  clearFileStore().catch((error) => console.warn('Could not delete local file copies', error));
+};
+
+// `offline` is set when showing a listing saved during an earlier visit
+// instead of a fresh one: `Map({ savedAt, availablePaths })`. `savedAt` is
+// `null` when no listing was saved. `availablePaths` are the files and
+// folders that can be opened without the sync back-end.
+export const setCurrentFileBrowserDirectoryListing = (
+  directoryListing,
+  hasMore,
+  additionalSyncBackendState,
+  path,
+  offline = null
+) => ({
+  type: 'SET_CURRENT_FILE_BROWSER_DIRECTORY_LISTING',
+  directoryListing,
+  hasMore,
+  additionalSyncBackendState,
+  path,
+  offline,
+});
+
+export const setIsLoadingMoreDirectoryListing = (isLoadingMore) => ({
+  type: 'SET_IS_LOADING_MORE_DIRECTORY_LISTING',
+  isLoadingMore,
+});
+
+const saveListing = (path, listing) =>
+  putListingRecord({ path, listing: listing.toJS() }).catch((error) =>
+    console.warn(`Could not save the listing of ${path}`, error)
+  );
+
+// Shows the listing of `path` saved during an earlier visit. Files can
+// be opened when they have a local copy or are loaded, folders when
+// their listing was saved.
+const showSavedListing = (path) => async (dispatch, getState) => {
+  let record;
+  let offlinePaths = { files: [], folders: [] };
+  try {
+    [record, offlinePaths] = await Promise.all([getListingRecord(path), getOfflinePaths()]);
+  } catch (error) {
+    console.warn(`Could not read the saved listing of ${path}`, error);
+  }
+  const loadedPaths = getState().org.present.get('files').keySeq();
+  const availablePaths = Set(offlinePaths.files).union(offlinePaths.folders).union(loadedPaths);
+  dispatch(
+    setCurrentFileBrowserDirectoryListing(
+      record ? List(record.listing.map((entry) => Map(entry))) : null,
+      false,
+      null,
+      path,
+      Map({ savedAt: record ? record.savedAt : null, availablePaths })
+    )
+  );
+};
+
+export const getDirectoryListing = (path) => (dispatch, getState) => {
+  if (getState().base.get('online') === false) {
+    return dispatch(showSavedListing(path));
+  }
+
+  dispatch(setLoadingMessage('Getting listing...'));
+
+  const client = getState().syncBackend.get('client');
+  return client
+    .getDirectoryListing(path)
+    .then(({ listing, hasMore, additionalSyncBackendState }) => {
+      dispatch(
+        setCurrentFileBrowserDirectoryListing(listing, hasMore, additionalSyncBackendState, path)
+      );
+      dispatch(hideLoadingMessage());
+      saveListing(path, listing);
+    })
+    .catch((error) => {
+      dispatch(hideLoadingMessage());
+      const error_summary = _.get(error, 'error.error_summary') || '';
+      if ([400, 401].includes(error.status) || error_summary.includes('expired_access_token')) {
+        dispatch(signOut());
+      } else {
+        console.error(error);
+        return dispatch(showSavedListing(path));
+      }
+    });
+};
+
+export const loadMoreDirectoryListing = () => (dispatch, getState) => {
+  dispatch(setIsLoadingMoreDirectoryListing(true));
+
+  const client = getState().syncBackend.get('client');
+  const path = getState().syncBackend.get('currentPath');
+  const currentFileBrowserDirectoryListing = getState().syncBackend.get(
+    'currentFileBrowserDirectoryListing'
+  );
+  return client
+    .getMoreDirectoryListing(currentFileBrowserDirectoryListing.get('additionalSyncBackendState'))
+    .then(({ listing, hasMore, additionalSyncBackendState }) => {
+      const extendedListing = currentFileBrowserDirectoryListing.get('listing').concat(listing);
+      dispatch(
+        setCurrentFileBrowserDirectoryListing(
+          extendedListing,
+          hasMore,
+          additionalSyncBackendState,
+          path
+        )
+      );
+      dispatch(setIsLoadingMoreDirectoryListing(false));
+      saveListing(path, extendedListing);
+    })
+    .catch((error) => {
+      console.error(error);
+      dispatch(setIsLoadingMoreDirectoryListing(false));
+    });
+};
+
+export const pushBackup = (pathOrFileId, contents) => {
+  return (dispatch, getState) => {
+    const client = getState().syncBackend.get('client');
+    switch (client.type) {
+      case 'Dropbox':
+      case 'WebDAV':
+        client.createFile(`${pathOrFileId}.organice-bak`, contents);
+        break;
+      case 'GitLab':
+      case 'Forgejo':
+        // No-op for git based backends, because the beauty of version control makes backup files redundant.
+        break;
+      default:
+    }
+  };
+};
+
+export const downloadFile = (path) => {
+  return (dispatch, getState) => {
+    dispatch(setLoadingMessage(`Downloading file ...`));
+    restoreUnsyncedLocalCopy(path)(dispatch, getState).then((restored) => {
+      // The file may have been loaded with unsynced edits, by this call
+      // or by another one (e.g. `OrgFile` and `Entry` both download the
+      // opened file if it is also loaded on startup).
+      if (restored || hasUnsyncedEdits(getState(), path)) {
+        dispatch(hideLoadingMessage());
+        dispatch(sync({ path }));
+      } else {
+        dispatch(fetchFile(path));
+      }
+    });
+  };
+};
+
+const hasUnsyncedEdits = (state, path) => !!state.org.present.getIn(['files', path, 'isDirty']);
+
+const fetchFile = (path) => {
+  return (dispatch, getState) => {
+    getState()
+      .syncBackend.get('client')
+      .getFileContents(path)
+      .then((fileContents) => {
+        dispatch(hideLoadingMessage());
+        if (hasUnsyncedEdits(getState(), path)) {
+          // Unsynced edits were loaded while downloading: sync them
+          // instead of replacing them with the remote version.
+          dispatch(sync({ path }));
+          return;
+        }
+        dispatch(pushBackup(path, fileContents));
+        dispatch(parseFile(path, fileContents));
+        dispatch(setLastSyncAt(addSeconds(new Date(), 5), path));
+        dispatch(setDirty(false, path));
+        dispatch(ActionCreators.clearHistory());
+      })
+      .catch((error) => {
+        console.error(`Downloading ${path} failed`, error);
+        dispatch(hideLoadingMessage());
+        dispatch(setIsLoading(false, path));
+        dispatch(reportFileError(path, 'load', error));
+      });
+  };
+};
+
+/**
+ * @param {String} path Returns the directory name of `path`.
+ */
+function dirName(path) {
+  return pathParse(path).dir;
+}
+
+export const createFile = (path, content) => {
+  return (dispatch, getState) => {
+    dispatch(setLoadingMessage(`Creating file: ${path}`));
+    getState()
+      .syncBackend.get('client')
+      .createFile(path, content)
+      .then(() => {
+        dispatch(setLastSyncAt(addSeconds(new Date(), 5), path));
+        dispatch(hideLoadingMessage());
+        dispatch(getDirectoryListing(dirName(path)));
+      })
+      .catch((error) => {
+        console.error(`Creating ${path} failed`, error);
+        dispatch(hideLoadingMessage());
+        dispatch(setIsLoading(false, path));
+        dispatch(reportFileError(path, 'create', error));
+      });
+  };
+};

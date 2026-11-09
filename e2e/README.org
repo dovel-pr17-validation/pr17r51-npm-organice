@@ -1,0 +1,168 @@
+# -*- org -*-
+* E2E Testing with Playwright
+
+This directory contains end-to-end tests for organice using [[https://playwright.dev/][Playwright]].
+
+** Running Tests
+
+#+BEGIN_SRC shell
+# Run all E2E tests (Chromium, Firefox, WebKIT, Mobile)
+yarn test:e2e
+
+# Run specific browser
+yarn test:e2e --project=chromium
+
+# Run with UI mode
+yarn test:e2e:ui
+
+# Run in debug mode
+yarn test:e2e:debug
+
+# Run in headed mode (show browser)
+yarn test:e2e:headed
+
+# View HTML report
+yarn test:e2e:report
+
+# Run Jest + Playwright
+yarn test:all
+#+END_SRC
+
+** Writing New Tests
+
+1. Create a new test file in the appropriate directory
+2. Use the existing helpers for common operations
+3. Follow the naming convention: =*.spec.js=
+4. Use CSS selectors or data-testid attributes for reliability
+
+*** Example Test
+
+Tests of the sample file import =test= from =e2e/fixtures.js=. Every
+such test starts on a freshly loaded =/sample=, and the =sample=
+fixture wraps the common interactions with it.
+
+#+BEGIN_SRC javascript
+import { test, expect } from '../../fixtures.js';
+
+test('should edit a header title', async ({ page, sample }) => {
+  await sample.select('Tables');
+  await sample.action('drawer-action-edit-title');
+  await page.getByTestId('titleLineInput').fill('New title');
+  await page.getByTestId('titleLineInput').press('Enter');
+  await expect(sample.header('New title')).toBeVisible();
+});
+#+END_SRC
+
+** Test Helpers
+
+- =e2e/fixtures.js=: the =sample= fixture (=select=, =deselect=,
+  =expand=, =action=, =closeDrawer=, =openSearch=, =header=, =titles=).
+- =helpers/gestures.js=: =swipe(page, locator, 'left' | 'right')= with
+  touch events on mobile projects and the mouse on desktop.
+- =helpers/firefox-helper.js=: clicks header action drawer icons, which
+  Firefox does not click reliably through Playwright.
+- =helpers/webdav-mock-helper.js=: an in-memory WebDAV server (see below).
+
+** Best Practices
+
+- Use specific selectors (class names or data-testid)
+- Keep tests isolated and independent
+- Test what =sample.org= documents: it is the in-app tutorial
+- Assert what the user sees, not React or Redux internals
+- Use auto-waiting (=expect(...)= retries) instead of =waitForTimeout=;
+  fixed waits are only for gesture timing such as a long-press
+- Test user flows, not implementation details
+- Use =/sample= route for unauthenticated tests
+- Target footer elements specifically with =.footer= prefix to avoid navbar matches
+
+** Authenticated Testing
+
+*** Overview
+
+Authenticated tests use a mock-based approach to test WebDAV sync functionality without requiring a real server. This allows testing of:
+- File browser functionality
+- File upload/download
+- Sync operations
+- Authentication flows
+
+*** Running Authenticated Tests
+
+#+BEGIN_SRC shell
+# Run authenticated e2e tests only
+yarn test:e2e:auth
+#+END_SRC
+
+The browser projects (=chromium=, =firefox=, ...) skip the authenticated
+tests, so run =yarn test:e2e:auth= as well after changing them.
+
+*** Mock-Based Testing Approach
+
+Authenticated tests use =WebDAVMockHelper= to intercept WebDAV API calls and return mock responses. This approach:
+- Eliminates need for external test servers
+- Provides deterministic test data
+- Enables testing of error conditions
+- Improves test speed and reliability
+
+**** WebDAVMockHelper Usage
+
+#+BEGIN_SRC javascript
+import WebDAVMockHelper from '../../helpers/webdav-mock-helper';
+
+const webdavMock = new WebDAVMockHelper(page);
+await webdavMock.setupMocks();
+
+// Add test files
+webdavMock.addMockFile('/test.org', '* TODO Test task\n');
+
+// Clear after test
+webdavMock.clearMockFiles();
+#+END_SRC
+
+**** Signing in
+
+To sign in without the form, set =authenticatedSyncService=,
+=webdavEndpoint=, =webdavUsername= and =webdavPassword= in localStorage
+and reload, as =signInViaLocalStorage= in =webdav-mock.spec.js= does.
+
+** Troubleshooting
+
+*** Common Issues
+
+**** Tests Fail with "No tests found"
+
+Ensure the =chromium-authenticated= project is configured in =playwright.config.js=. Run:
+
+#+BEGIN_SRC shell
+npx playwright test --project=chromium-authenticated --list
+#+END_SRC
+
+**** Mock Responses Not Working
+
+1. Verify =setupMocks()= is called before navigation
+2. Check that WebDAV URL pattern matches your mock configuration
+3. Use =--debug= flag to inspect network requests
+
+**** Authentication Fails
+
+1. Verify localStorage keys are set correctly (=webdavEndpoint=, =webdavUsername=, =webdavPassword=)
+2. Check that =authenticatedSyncService= is set to ='WebDAV'=
+3. Ensure the file browser (=.file-browser-container=) appears
+
+**** File Operations Not Working
+
+1. Verify mock files are added before test execution
+2. Check file paths start with =/=
+3. Ensure route interception is set up before any WebDAV calls
+
+**** CI/CD Test Failures
+
+Check the GitHub Actions logs (failed e2e jobs upload their Playwright report and traces as artifacts) for:
+- Browser installation failures
+- Network timeouts during =yarn install=
+- Playwright browser installation
+
+** Resources
+
+- [[https://playwright.dev/][Playwright Documentation]]
+- [[https://playwright.dev/docs/best-practices][Best Practices]]
+- [[https://playwright.dev/docs/mock][Playwright Mocking Guide]]
