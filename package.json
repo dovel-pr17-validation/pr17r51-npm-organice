@@ -6,7 +6,7 @@
     "node": "^20.17.0"
   },
   "resolutions": {
-    "@babel/core": "^7.16.0"
+    "@babel/core": "^7.29.13"
   },
   "dependencies": {
     "@bity/oauth2-auth-code-pkce": "^2.13.0",
@@ -69,7 +69,7 @@
     "postinstall": "if [ \"$ON_HEROKU\" ]; then npm install -g serve; fi"
   },
   "devDependencies": {
-    "@babel/core": "^7.16.0",
+    "@babel/core": "^7.29.13",
     "@babel/plugin-proposal-private-property-in-object": "^7.21.11",
     "@parcel/packager-raw-url": "2.14.4",
     "@parcel/transformer-inline-string": "2.14.4",
